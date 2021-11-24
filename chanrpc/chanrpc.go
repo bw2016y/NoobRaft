@@ -1,15 +1,16 @@
 package chanrpc
 
-import "MRaft/labgob"
+import (
+	"MRaft/labgob"
+	"go/types"
+	"math/rand"
+	"sync"
+	"sync/atomic"
+	"time"
+)
 import "bytes"
 import "reflect"
-import "sync"
 import "log"
-import "strings"
-import "math/rand"
-import "time"
-import "sync/atomic"
-
 
 type reqMsg struct {
 	endId interface{}
@@ -77,4 +78,158 @@ func(c *Client) Call(svcMeth string , args interface{}, reply interface{}) bool{
 		return false
 	}
 
+}
+
+type Network struct{
+
+	mu				sync.Mutex
+	reliable 		bool
+	longDelays		bool   // pause a long time
+	longReordering 	bool
+
+	ends			map[interface{}]*Client // 根据id找到end
+	enabled			map[interface{}]bool
+	servers 		map[interface{}]*Server // servers
+	connections 	map[interface{}]interface{} // client id -> server id
+
+
+	endCh 			chan reqMsg
+
+	done 			chan struct{} // closed when Network is cleaned up
+	count			int32 // total RPC count , for statistics
+	bytes 			int64 // total bytes send, for statistics
+
+}
+
+func NewNetwork() * Network{
+	net := & Network{}
+
+	net.reliable = true
+
+	net.ends = map[interface{}]*Client{}
+	net.enabled = map[interface{}]bool{}
+	net.servers = map[interface{}]*Server{}
+	net.connections = map[interface{}](interface{}){}
+
+	net.endCh = make(chan reqMsg)
+	net.done = make(chan struct{})
+
+
+	// handle all Client Call
+
+	go func() {
+		for{
+
+			select {
+				case req := <- net.endCh:
+
+					// statictics
+					atomic.AddInt32(&net.count , 1)
+					atomic.AddInt64(&net.bytes,int64(len(req.args)))
+					go net.processReq(req)
+				case <- net.done:
+					return
+			}
+
+		}
+
+	}()
+
+	return net
+}
+
+func (net *Network) Cleanup(){
+	close(net.done)
+}
+
+func (net *Network) Reliable(flag bool){
+	net.mu.Lock()
+	defer net.mu.Unlock()
+
+	net.reliable = flag
+}
+
+func (net *Network) LongReordering(flag bool){
+	net.mu.Lock()
+	defer net.mu.Unlock()
+
+	net.longReordering=flag
+}
+
+func (net *Network) LongDelays(flag bool){
+	net.mu.Lock()
+	defer net.mu.Unlock()
+
+	net.longDelays=flag
+}
+
+func (net *Network) readEndIdInfo(cid interface{})(enabled bool,serverId interface{},server *Server,reliable bool,longReordering bool){
+	net.mu.Lock()
+	defer net.mu.Unlock()
+
+	enabled = net.enabled[cid]
+	serverId = net.connections[cid]
+
+	if serverId != nil{
+		server = net.servers[serverId]
+	}
+
+	reliable = net.reliable
+	longReordering = net.longReordering
+
+	return
+}
+
+func (net *Network) isServerDead(cid interface{}, sid interface{} ,server *Server) bool {
+	net.mu.Lock()
+	defer net.mu.Unlock()
+
+	if net.enabled[cid]==false || net.servers[sid] != server {
+		return true
+	}
+
+	return false
+}
+
+func (net *Network) processReq(req reqMsg){
+	enabled , sid , server , reliable , longReordering := net.readEndIdInfo(req.endId)
+
+	if enabled && sid != nil && server != nil{
+		// not reliable
+		if reliable == false{
+			ms := (rand.Int() %27)
+			time.Sleep(time.Duration(ms) * time.Millisecond)
+		}
+
+
+		if reliable== false && (rand.Int()%1000 < 100){
+			// drop request , return as if timeout
+			req.replyCh <- repMsg{false,nil}
+			return
+		}
+
+		// execute the request
+		// ...
+		// todo
+
+
+
+	}
+
+	return
+}
+
+
+type Server struct{
+	mu			sync.Mutex
+	services	map[string]*Service
+	// incoming RPCs
+	count 		int
+}
+
+type Service struct {
+	name		string
+	rcvr		reflect.Value
+	typ 		reflect.Type
+	methods		map[string]reflect.Method
 }
