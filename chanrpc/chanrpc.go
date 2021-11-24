@@ -219,6 +219,30 @@ func (net *Network) processReq(req reqMsg){
 	return
 }
 
+func (net *Network) MakeClient(cid interface{}) *Client{
+	net.mu.Lock()
+	defer net.mu.Unlock()
+
+
+	if _,f := net.ends[cid] ; f{
+		log.Fatalf("Make Client fail, %v already exists\n",cid)
+	}
+
+	c := &Client{}
+
+	c.endId = cid
+	c.ch = net.endCh
+	c.done = net.done
+
+	net.ends[cid] = c
+	// ?
+	net.enabled[cid] = false
+	// ?
+	net.connections[cid] = nil
+
+	return c
+}
+
 
 type Server struct{
 	mu			sync.Mutex
