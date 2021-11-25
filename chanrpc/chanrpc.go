@@ -4,6 +4,7 @@ import (
 	"MRaft/labgob"
 	"go/types"
 	"math/rand"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -243,6 +244,61 @@ func (net *Network) MakeClient(cid interface{}) *Client{
 	return c
 }
 
+func (net *Network) AddServer(sid interface{}, server * Server){
+	net.mu.Lock()
+	defer net.mu.Unlock()
+
+	net.servers[sid] = server
+}
+
+
+func (net *Network) DeleteServer(sid interface{}){
+	net.mu.Lock()
+	defer net.mu.Unlock()
+
+	// delete
+	net.servers[sid] = nil
+}
+
+// client connect to a server
+func (net *Network) Connect(cid interface{},sid interface{}){
+	net.mu.Lock()
+	defer net.mu.Unlock()
+
+	net.connections[cid] = sid
+}
+
+func (net *Network) Enable(cid interface{},flag bool){
+	net.mu.Lock()
+	defer net.mu.Unlock()
+
+	net.enabled[cid] = flag
+}
+
+
+// get a server's count of incoming RPC
+func (net *Network) GetCount(sid interface{}) int {
+	net.mu.Lock()
+	defer net.mu.Unlock()
+
+	server := net.servers[sid]
+
+	return server.GetCount()
+}
+
+
+func (net *Network) GetTotalCount() int{
+	x := atomic.LoadInt32(&net.count)
+	return int(x)
+}
+
+func (net *Network) GetTotalBytes() int64{
+	x := atomic.LoadInt64(&net.bytes)
+	return x
+}
+
+// server is a logic server
+// both Raft and k/v server can listen to the same rpc endpoint
 
 type Server struct{
 	mu			sync.Mutex
@@ -251,9 +307,64 @@ type Server struct{
 	count 		int
 }
 
+
+func MakeServer() *Server{
+	server := &Server{}
+	server.services = map[string]*Service{}
+	return server
+}
+
+
+func (server *Server) AddService(svc *Service){
+	server.mu.Lock()
+	defer server.mu.Unlock()
+
+	server.services[svc.name] = svc
+}
+
+func (server *Server) dispatch(req reqMsg) repMsg{
+	server.mu.Lock()
+
+	server.count += 1
+
+	dot := strings.LastIndex(req.svcMethod , ".")
+	serviceName := req.svcMethod[:dot]
+	methodName := req.svcMethod[dot+1:]
+
+	service,ok := server.services[serviceName]
+
+	server.mu.Unlock()
+
+	if ok {
+		return service.dispatch(methodName,req)
+	}else{
+		choices := []string{}
+		for k,_ := range server.services{
+			choices = append(choices,k)
+		}
+		log.Fatalf("Server dispatch Error: unknown service %v in %v.%v; expecting one of %v\n",serviceName,serviceName,methodName,choices)
+		return repMsg{false , nil}
+	}
+
+}
+
+
+
+
+func (server *Server) GetCount() int{
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	return server.count
+}
+
+
+// Raft Service
+// k/v Service
+// a single server may have more than one Service
+
 type Service struct {
 	name		string
-	rcvr		reflect.Value
-	typ 		reflect.Type
+	serVal		reflect.Value
+	serType 	reflect.Type
 	methods		map[string]reflect.Method
 }
