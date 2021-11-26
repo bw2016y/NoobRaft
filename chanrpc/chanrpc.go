@@ -2,6 +2,7 @@ package chanrpc
 
 import (
 	"MRaft/labgob"
+	"fmt"
 	"go/types"
 	"math/rand"
 	"strings"
@@ -350,7 +351,6 @@ func (server *Server) dispatch(req reqMsg) repMsg{
 
 
 
-
 func (server *Server) GetCount() int{
 	server.mu.Lock()
 	defer server.mu.Unlock()
@@ -367,4 +367,78 @@ type Service struct {
 	serVal		reflect.Value
 	serType 	reflect.Type
 	methods		map[string]reflect.Method
+}
+
+
+func MakeService(handler interface{})*Service{
+	svc := &Service{}
+
+	svc.serType = reflect.TypeOf(handler)
+	svc.serVal  = reflect.ValueOf(handler)
+
+	// handler 是一个指针？
+	svc.name  = reflect.Indirect(svc.serVal).Type().Name()
+	svc.methods = map[string]reflect.Method{}
+
+
+	for m := 0 ; m <svc.serType.NumMethod(); m++ {
+		method := svc.serType.Method(m)
+
+		mtype := method.Type
+		mname := method.Name
+
+		// 这里对方法的参数数目做了限制
+		if method.PkgPath != "" || mtype.NumIn() != 3 || mtype.In(2).Kind()!= reflect.Ptr || mtype.NumOut() != 0 {
+			log.Fatalf("bad method %v\n",mname)
+		}else{
+			svc.methods[mname] = method
+		}
+
+	}
+
+	return svc
+}
+
+func (svc *Service) dispatch(methodname string, req reqMsg) repMsg{
+	if method,ok := svc.methods[methodname]; ok {
+
+
+		args := reflect.New(req.argsType)
+
+		// decode the argument
+		db := bytes.NewBuffer(req.args)
+		de := labgob.NewDecoder(db)
+
+		// value -> interface()
+		de.Decode(args.Interface())
+
+
+		// allocate space for the reply
+
+		replyType := method.Type.In(2)
+		replyType = replyType.Elem()
+		replyv := reflect.New(replyType)
+
+		// call the method
+		function := method.Func
+		function.Call([]reflect.Value{svc.serVal , args.Elem() , replyv })
+
+		// encode the reply
+		eb := new(bytes.Buffer)
+		ec := labgob.NewEncoder(eb)
+		ec.EncodeValue(replyv)
+
+		return repMsg{true, eb.Bytes()}
+
+
+	} else {
+
+		choices := []string{}
+		for k,_ := range svc.methods{
+			 choices = append(choices,k)
+		}
+		log.Fatalf("Service dispatch error : unknown method %v in %v , exptecting one of %v\n",methodname,req.svcMethod,choices)
+
+		return repMsg{false,nil}
+	}
 }
