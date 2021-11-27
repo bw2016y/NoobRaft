@@ -2,8 +2,6 @@ package chanrpc
 
 import (
 	"MRaft/labgob"
-	"fmt"
-	"go/types"
 	"math/rand"
 	"strings"
 	"sync"
@@ -194,6 +192,7 @@ func (net *Network) isServerDead(cid interface{}, sid interface{} ,server *Serve
 }
 
 func (net *Network) processReq(req reqMsg){
+
 	enabled , sid , server , reliable , longReordering := net.readEndIdInfo(req.endId)
 
 	if enabled && sid != nil && server != nil{
@@ -213,12 +212,69 @@ func (net *Network) processReq(req reqMsg){
 		// execute the request
 		// ...
 		// todo
+		//
+
+		replyCh := make(chan repMsg)
+		go func() {
+			rep := server.dispatch(req)
+			replyCh <- rep
+		}()
 
 
+		replyOK := false
+		serverDead := false
+		var rr repMsg
+		//
+		for replyOK == false && serverDead == false {
+			select{
+				case rr = <- replyCh :
+					replyOK = true
+				case <- time.After(100*time.Millisecond):
+					serverDead = net.isServerDead(req.endId,sid,server)
+					if serverDead {
+						go func() {
+							<- replyCh // drain channel
+						}()
+					}
 
+			}
+		}
+
+
+		serverDead = net.isServerDead(req.endId,sid,server)
+
+		if replyOK == false || serverDead == true{
+			// server was killed while we were waiting
+			req.replyCh <- repMsg{false,nil}
+
+		} else if reliable == false && (rand.Int()%1000) < 100{
+			// drop the reply , return as if timeout
+			req.replyCh <- repMsg{false,nil}
+		}else if longReordering == true  &&  rand.Intn(900)<600 {
+			ms:= 200 + rand.Intn(1+rand.Intn(2000))
+			time.AfterFunc(time.Duration(ms)*time.Millisecond,func(){
+				atomic.AddInt64(&net.bytes , int64(len(rr.reply)))
+				req.replyCh <- rr
+			})
+		}else{
+			// normal
+			atomic.AddInt64(&net.bytes , int64(len(rr.reply)))
+			req.replyCh <- rr
+		}
+
+	} else {
+		ms := 0
+		if net.longDelays {
+			ms = (rand.Int()%7000)
+		}else {
+			ms = (rand.Int()%100)
+		}
+
+		time.AfterFunc(time.Duration(ms)*time.Millisecond , func() {
+			req.replyCh <- repMsg{false,nil}
+		})
 	}
 
-	return
 }
 
 func (net *Network) MakeClient(cid interface{}) *Client{
