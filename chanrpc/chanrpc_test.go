@@ -37,6 +37,13 @@ func (js * JunkService) Handler2(args int,reply * string){
 	*reply = "handler2-" + strconv.Itoa(args)
 }
 
+func (js *JunkService) Handler4(args *JunkArgs, reply *JunkReply){
+	reply.X = "pointer"
+}
+
+func (js *JunkService) Handler5(args JunkArgs, reply *JunkReply){
+	reply.X = "no pointer"
+}
 
 func TestEasic(t *testing.T){
 	runtime.GOMAXPROCS(4)
@@ -73,5 +80,58 @@ func TestEasic(t *testing.T){
 	}
 
 
+}
 
+func TestTypes(t *testing.T){
+	runtime.GOMAXPROCS(4)
+
+	net := NewNetwork()
+	defer net.Cleanup()
+
+	c := net.MakeClient("c1")
+
+	js := &JunkService{}
+	svc := MakeService(js)
+
+	server := MakeServer()
+
+	server.AddService(svc)
+
+	net.AddServer("s1",server)
+
+	net.Connect("c1","s1")
+
+	// net.Enable("c1",true)
+
+	{
+		var args JunkArgs
+		var reply JunkReply
+
+		c.Call("JunkService.Handler4",&args,&reply)
+		//if reply.X != "pointer"{
+		//	t.Fatalf("wrong reply from Handler4")
+		//}
+
+		if reply.X != "" {
+			t.Fatalf("unexpected reply from Handler4")
+		}
+	}
+
+	net.Enable("c1",true)
+
+	{
+		var args JunkArgs
+		var reply JunkReply
+
+		c.Call("JunkService.Handler5",args,&reply)
+		if reply.X != "no pointer" {
+			t.Fatalf("wrong reply from Handler5")
+		}
+
+	}
+
+	cnt := net.GetTotalCount()
+	if cnt != 2{
+		t.Fatalf("wrong GetTotalCount()")
+	}
 }

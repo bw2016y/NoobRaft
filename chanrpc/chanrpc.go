@@ -470,7 +470,6 @@ func (svc *Service) dispatch(methodname string, req reqMsg) repMsg{
 
 
 		// allocate space for the reply
-
 		replyType := method.Type.In(2)
 		replyType = replyType.Elem()
 		replyv := reflect.New(replyType)
