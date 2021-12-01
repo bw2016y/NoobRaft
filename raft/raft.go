@@ -75,7 +75,7 @@ func (rf *Raft) persist(){
 
 // restore previously persisted state
 func (rf *Raft) readPersist(data []byte){
-	// todo
+	// todo add code
 }
 
 
@@ -83,9 +83,11 @@ func (rf *Raft) readPersist(data []byte){
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
 //
+
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 
 	// Your code here (2D).
+	// todo add code
 
 	return true
 }
@@ -94,9 +96,10 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
+
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
-
+	// todo make snapshot
 }
 
 
@@ -104,8 +107,11 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
+
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+
+	// todo VoteReqArgs
 }
 
 //
@@ -114,6 +120,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	// todo VoteRepArgs
+
 }
 
 //
@@ -121,6 +129,7 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	// todo deal with Votes
 }
 
 //
@@ -157,7 +166,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-
+//
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -167,10 +176,12 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // may fail or lose an election. even if the Raft instance has been killed,
 // this function should return gracefully.
 //
+//
 // the first return value is the index that the command will appear at
 // if it's ever committed. the second return value is the current
 // term. the third return value is true if this server believes it is
 // the leader.
+//
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
@@ -178,7 +189,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
+	// todo upper service api
 
 	return index, term, isLeader
 }
@@ -197,6 +208,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	// todo Kill stuff
 }
 
 func (rf *Raft) killed() bool {
@@ -212,7 +224,7 @@ func (rf *Raft) ticker() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
-
+		// todo election start check
 	}
 }
 
@@ -241,7 +253,11 @@ func Make(peers []*chanrpc.Client, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	// todo make Raft server
+	// applyCh -> upper service
 
+	// upper service -> raft
+	// rf.Start()
 
 	return rf
 }
