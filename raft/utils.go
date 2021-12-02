@@ -2,6 +2,8 @@ package raft
 
 import (
 	"MRaft/chanrpc"
+	"MRaft/labgob"
+	"bytes"
 	"encoding/base64"
 	"fmt"
 	"log"
@@ -46,7 +48,7 @@ type config struct {
 	n	 		int  // raft peers num
 	rafts 		[]*Raft
 	applyErr	[]string
-	connected	[]bool
+	connected	[]bool  // raft peers connected state
 	saved		[]*Persister
 	clientNames [][]string
 	logs 		[]map[int]interface{}
@@ -185,7 +187,28 @@ func (cfg *config) checkLogs(i int, m ApplyMsg)(string ,bool){
 
 // applier reads message from applyCh and checks that they match the log contents
 func (cfg *config) applier(i int, applyCh chan ApplyMsg){
-	// todo
+
+	for m := range applyCh {
+		if m.CommandValid == false{
+			// not valid
+		} else {
+			cfg.mu.Lock()
+			err_msg , prevok := cfg.checkLogs(i,m)
+			cfg.mu.Unlock()
+
+			if m.CommandIndex > 1 && prevok == false {
+				err_msg = fmt.Sprintf("server %v apply out of order %v", i , m.CommandIndex)
+			}
+
+			if err_msg != "" {
+				log.Fatalf("apply error: %v \n", err_msg)
+				cfg.applyErr[i] = err_msg
+
+
+			}
+		}
+	}
+
 }
 
 const SnapShotInterval = 10
@@ -193,23 +216,234 @@ const SnapShotInterval = 10
 // periodically snapshot raft state
 func (cfg *config) applierSnap(i int , applyCh chan ApplyMsg){
 	// todo
+	lastApplied := 0
+	for m:= range applyCh{
+		if m.SnapshotValid {
+			cfg.mu.Lock()
+
+			if cfg.rafts[i].CondInstallSnapshot(m.SnapshotTerm , m.SnapshotIndex , m.Snapshot){
+				cfg.logs[i] = make(map[int]interface{})
+
+
+				r := bytes.NewBuffer(m.Snapshot)
+				d := labgob.NewDecoder(r)
+				var v int
+				if d.Decode(&v) != nil {
+					log.Fatalf("decode error\n")
+				}
+				cfg.logs[i][m.SnapshotIndex] = v
+				lastApplied = m.SnapshotIndex
+
+			}
+
+			cfg.mu.Unlock()
+		} else if m.CommandValid && m.CommandIndex > lastApplied {
+			cfg.mu.Lock()
+			err_msg , prevok := cfg.checkLogs(i,m)
+			cfg.mu.Unlock()
+
+			if m.CommandIndex > 1 && prevok == false {
+				err_msg = fmt.Sprintf("server %v apply out of order %v" , i , m.CommandIndex)
+			}
+
+			if err_msg != ""{
+				log.Fatalf("apply error: %v \n",err_msg)
+				cfg.applyErr[i] = err_msg
+			}
+
+
+			lastApplied = m.CommandIndex
+
+			if (m.CommandIndex + 1)%SnapShotInterval == 0 {
+				w := new(bytes.Buffer)
+				e := labgob.NewEncoder(w)
+				v := m.Command
+				e.Encode(v)
+
+				cfg.rafts[i].Snapshot(m.CommandIndex , w.Bytes())
+
+			}
+		} else {
+			// Ignore other types of ApplyMsg or old commands.
+		}
+
+	}
 }
 
+// start Or ReBoot a Raft peer
 
+// if raft service already exists , "kill" it first
+// allocate new outgoing port file names, and a new state persister, to isolate previous instance of this server
 func (cfg *config) start1(i int, applier func(int,chan ApplyMsg)){
 	//todo
+	cfg.crash1(i)
+
+	// fresh client set
+	// old crashed instance client cant send
+	cfg.clientNames[i] = make([]string, cfg.n)
+
+	for j := 0 ; j < cfg.n ; j++ {
+		cfg.clientNames[i][j] = randstring(20)
+	}
+
+	// a fresh set of Client
+	clients := make([]*chanrpc.Client , cfg.n)
+	for j := 0 ; j < cfg.n ; j++{
+		// make client
+		clients[j] = cfg.net.MakeClient(cfg.clientNames[i][j])
+
+		// connect
+		cfg.net.Connect(cfg.clientNames[i][j],j)
+	}
+
+	cfg.mu.Lock()
+
+	if cfg.saved[i] != nil {
+		cfg.saved[i] = cfg.saved[i].Copy()
+	}else {
+		cfg.saved[i] = MakePersister()
+	}
+
+	cfg.mu.Unlock()
+
+	applyCh := make(chan ApplyMsg)
+
+	rf := Make(clients , i , cfg.saved[i] , applyCh)
+
+	cfg.mu.Lock()
+	cfg.rafts[i] = rf
+	cfg.mu.Unlock()
+
+
+	go applier(i , applyCh)
+
+	svc := chanrpc.MakeService(rf)
+	server := chanrpc.MakeServer()
+	server.AddService(svc)
+	cfg.net.AddServer(i,server)
+
 }
+
+
+func (cfg *config) checkTimeout(){
+	// 120s time limit
+	if !cfg.t.Failed() && time.Since(cfg.start) > 120 * time.Second{
+		cfg.t.Fatal("test took longer than 120 seconds")
+	}
+}
+
+func (cfg *config) cleanup(){
+	for i :=0 ; i< len(cfg.rafts);i++{
+		if cfg.rafts[i] != nil{
+			cfg.rafts[i].Kill()
+		}
+	}
+	cfg.net.Cleanup()
+
+	// check
+	cfg.checkTimeout()
+}
+
+
 
 // attatch server i to the net
 func (cfg *config) connect(i int){
+	cfg.connected[i] = true
 
+	for j := 0 ; j <cfg.n ; j++ {
+		if cfg.connected[j] {
+			clientName := cfg.clientNames[i][j]
+			cfg.net.Enable(clientName , true)
+		}
+	}
+
+	for j := 0 ; j <cfg.n ;j++ {
+		if cfg.connected[j]{
+			clientName := cfg.clientNames[j][i]
+			cfg.net.Enable(clientName,true)
+		}
+	}
 }
 
 // detach server i fron the net
-func (cfg *config)disconnect(i int){
+func (cfg *config) disconnect(i int){
+
+	cfg.connected[i] = false
+
+	for j := 0; j <cfg.n ;j++{
+		if cfg.clientNames[i] != nil {
+			clientName := cfg.clientNames[i][j]
+			cfg.net.Enable(clientName,false)
+		}
+	}
+
+	for j := 0 ; j <cfg.n ;j++ {
+		if cfg.connected[j]{
+			clientName := cfg.clientNames[j][i]
+			cfg.net.Enable(clientName,false)
+		}
+	}
 
 }
+
+
+func (cfg *config) rpcCount(server int) int {
+	return cfg.net.GetCount(server)
+}
+
+func (cfg *config) rpcTotal() int{
+	return cfg.net.GetTotalCount()
+}
+
 
 func (cfg *config) setUnreliable(flag bool){
-	cfg.net.Reliable(flag)
+	cfg.net.Reliable(!flag)
 }
+
+func (cfg *config) bytesTotal() int64{
+	return cfg.net.GetTotalBytes()
+}
+
+func (cfg *config) setlongreordering(longrel bool){
+	cfg.net.LongReordering(longrel)
+}
+
+
+// check that there's exactly one leader
+func (cfg *config) checkOneLeader() int{
+	for iters := 0 ; iters < 10 ; iters++{
+		ms := 450 + (rand.Int63()%100)
+		time.Sleep(time.Duration(ms)*time.Millisecond)
+
+		leaders := make(map[int][]int)
+		for i:=0 ; i<cfg.n;i++{
+			if cfg.connected[i]{
+				if term , leader := cfg.rafts[i].GetState(); leader{
+					leaders[term] = append(leaders[term],i)
+				}
+			}
+		}
+
+		lastTermWithLeader := -1
+
+		for term , leader := range leaders{
+			if len(leader) > 1 {
+				cfg.t.Fatalf("term %d has %d (>1) leaders", term , len(leader))
+			}
+
+			if term > lastTermWithLeader {
+				lastTermWithLeader = term
+			}
+		}
+
+		if len(leaders) !=0 {
+			return leaders[lastTermWithLeader][0]
+		}
+
+	}
+
+	cfg.t.Fatalf("expected one leader, got none")
+	return -1
+}
+
+
