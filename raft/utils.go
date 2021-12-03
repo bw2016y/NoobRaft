@@ -446,4 +446,147 @@ func (cfg *config) checkOneLeader() int{
 	return -1
 }
 
+// check that everyone agrees on the term
+func (cfg *config) checkTerms() int{
+	term := -1
+	for i:=0 ; i<cfg.n ;i++{
+		if cfg.connected[i]{
+			xterm , _ := cfg.rafts[i].GetState()
+			if term == -1 {
+				term = xterm
+			}else if term != xterm{
+				cfg.t.Fatalf("servers disagree on term")
+			}
 
+		}
+	}
+	return term
+}
+
+// check that there is no leader
+func (cfg *config) checkNoLeader(){
+	for i:=0 ;i <cfg.n; i++{
+		if cfg.connected[i] {
+			_ , f := cfg.rafts[i].GetState()
+			if f {
+				cfg.t.Fatalf("expected no leader , but %v claims to be leader",i)
+			}
+		}
+	}
+}
+
+// how many servers think a log entry is committed?
+func (cfg *config) nCommitted(index int) (int ,interface{}){
+	cnt := 0
+
+	var cmd interface{} = nil
+	for i:= 0 ;i<cfg.n; i++{
+		if cfg.applyErr[i] != ""{
+			cfg.t.Fatal(cfg.applyErr[i])
+		}
+
+		cfg.mu.Lock()
+		ccmd , f := cfg.logs[i][index]
+		cfg.mu.Unlock()
+
+		if f{
+			if cnt > 0 && ccmd != cmd {
+				cfg.t.Fatalf("committed values do not match: index %v , %v , %v\n",index ,cmd ,ccmd)
+			}
+			cnt += 1
+			cmd = ccmd
+		}
+	}
+
+	return cnt,cmd
+}
+
+// wait for at least n servers to commit
+// dont wait forever
+func (cfg *config) wait(index int , n int ,startTerm int) interface{}{
+	to := 10 * time.Millisecond
+	for it := 0 ; it < 30 ; it++{
+		cnt , _ := cfg.nCommitted(index)
+		if cnt >= n {
+			break
+		}
+		time.Sleep(to)
+
+		if to < time.Second {
+			//
+			to *= 2
+		}
+
+		if startTerm > -1 {
+			for _ , r := range cfg.rafts{
+				if curterm ,_  := r.GetState() ; curterm > startTerm{
+					// raft peers has moved on
+					// we cant guarentee that raft will agree on entry (index)
+					return -1
+				}
+			}
+		}
+
+	}
+
+	cnt , cmd := cfg.nCommitted(index)
+	if cnt < n {
+		cfg.t.Fatalf("only %d decided for index %d; wanted %d \n", cnt,index,n)
+	}
+
+	return cmd
+}
+
+// do a complete agreement
+//
+func (cfg *config) one(cmd interface{}, expectedServers int , retry bool) int{
+	// todo
+	return -1
+}
+
+
+// start a test
+// print the Test message
+func (cfg *config) begin(description string){
+	fmt.Printf("%s ... \n",description)
+
+	cfg.t0 = time.Now()
+	cfg.rpcs0 = cfg.rpcTotal()
+	cfg.bytes0 = cfg.bytesTotal()
+
+	cfg.cmds0 = 0
+	cfg.maxIndex0 = cfg.maxIndex
+}
+
+// end a Test
+// and Test go through here with no failure
+
+func (cfg *config) end(){
+	cfg.checkTimeout()
+	if cfg.t.Failed() == false {
+		cfg.mu.Lock()
+		t := time.Since(cfg.t0).Seconds()
+
+		npeers := cfg.n
+		nrpc := cfg.rpcTotal() - cfg.rpcs0
+		nbytes := cfg.bytesTotal() - cfg.bytes0
+		ncmds := cfg.maxIndex - cfg.maxIndex0
+
+		cfg.mu.Unlock()
+
+		fmt.Printf("----- passed -----")
+		fmt.Printf("%4.1f %d %4d %7d %4d \n", t,npeers,nrpc,nbytes,ncmds)
+	}
+}
+
+// Maximum log size across all raft peers
+func (cfg * config) LogSize() int{
+	logsize := 0
+	for i:=0 ; i<cfg.n; i++{
+		n := cfg.saved[i].RaftStateSize()
+		if n > logsize {
+			logsize = n
+		}
+	}
+	return logsize
+}
