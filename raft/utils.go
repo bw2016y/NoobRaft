@@ -538,9 +538,68 @@ func (cfg *config) wait(index int , n int ,startTerm int) interface{}{
 }
 
 // do a complete agreement
+// using for loop to find leader
+// try to re submit before giving up
+// entirely give up after about 10 seconds
 //
+// if retry ==  true, may submit the command multiple times (in case that a leader fails just after Start())
+// if retry ==  false, call raft.Start() only once, in order to simplify
+//
+
 func (cfg *config) one(cmd interface{}, expectedServers int , retry bool) int{
-	// todo
+	t0 := time.Now()
+	starts := 0
+
+	for time.Since(t0).Seconds() < 10{
+		// try all the servers , maybe one is the leader
+
+		index := -1
+		for si :=0 ; si<cfg.n ; si++{
+			starts = (starts+1) %cfg.n
+
+			var rf *Raft
+			cfg.mu.Lock()
+			if cfg.connected[starts]{
+				rf = cfg.rafts[starts]
+			}
+			cfg.mu.Unlock()
+			if rf != nil{
+				cindex , _ ,ok := rf.Start(cmd)
+				if ok {
+					index = cindex
+					break
+				}
+			}
+
+		}
+
+
+		if index != -1{
+			// somebody claimed to be the leader and have submitted our command;
+			// wait a while for agreement
+			t1 := time.Now()
+			for time.Since(t1).Seconds() < 2{
+				cnt , cmd1 := cfg.nCommitted(index)
+				if cnt > 0 && cnt >= expectedServers {
+					// committed
+					if cmd1 == cmd{
+						// and it was the command that we submitted.
+						return index
+					}
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+
+			if retry == false {
+				cfg.t.Fatalf("one(%v) failed to reach agreement",cmd)
+			}
+
+		} else {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+
+	cfg.t.Fatalf("one(%v) failed to reash agreement", cmd)
 	return -1
 }
 
