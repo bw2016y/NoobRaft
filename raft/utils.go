@@ -288,7 +288,7 @@ func (cfg *config) start1(i int, applier func(int,chan ApplyMsg)){
 
 	// a fresh set of Client
 	clients := make([]*chanrpc.Client , cfg.n)
-	for j := 0 ; j < cfg.n ; j++{
+	for j := 0 ; j < cfg.n ; j++ {
 		// make client
 		clients[j] = cfg.net.MakeClient(cfg.clientNames[i][j])
 
@@ -300,7 +300,7 @@ func (cfg *config) start1(i int, applier func(int,chan ApplyMsg)){
 
 	if cfg.saved[i] != nil {
 		cfg.saved[i] = cfg.saved[i].Copy()
-	}else {
+	} else {
 		cfg.saved[i] = MakePersister()
 	}
 

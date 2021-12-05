@@ -13,9 +13,41 @@ package raft
 
 import (
 	"MRaft/chanrpc"
+	"math/rand"
 	"sync"
 	"sync/atomic"
+	"time"
 )
+
+
+
+
+type RaftState int32
+
+// consts
+const (
+	Follower RaftState = 0
+	Leader RaftState = 1
+	Candidate RaftState = 2
+
+	HeartbeatTimeout = 125
+	ElectionTimeout = 1000
+
+)
+
+type localRand struct {
+	rand *rand.Rand
+}
+
+func (r *localRand) Intn(n int) int{
+	return r.rand.Intn(n)
+}
+
+var rrand = &localRand{
+	rand : rand.New(rand.NewSource(time.Now().UnixNano())),
+}
+
+
 
 // Msg sent to the upper service
 //
@@ -33,12 +65,70 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
+// Raft  service will send Entry to Rafr peers
+type Entry struct{
+	Index 		int
+	Term 		int
+	Command 	interface{}
+}
+
+func StableHeartbeatTimeout() time.Duration{
+	return time.Duration(HeartbeatTimeout) * time.Millisecond
+}
+
+func RandomizedElectionTimeout() time.Duration{
+	return time.Duration(ElectionTimeout +  rrand.Intn(ElectionTimeout)) * time.Millisecond
+}
+
+// todo check Raft paper
+type AppendEntriesRequest struct {
+	Term 			int
+	LeaderId 		int
+	PrevLogIndex 	int
+	PrevLogTerm		int
+
+	LeaderCommit 	int
+	Entries  		[]Entry
+}
+
+type AppendEntriesResponse struct {
+	Term 			int
+	Success			bool
+	ConflictIndex	int
+	ConflictTerm	int
+}
+
+
+type InstallSnapshotRequest struct {
+	Term 				int
+	LeaderId			int
+	LastIncludedIndex 	int
+	LastIncludedTerm 	int
+	Data 				[]byte
+}
+
+type InstallSnapshotResponse struct {
+	Term				int
+}
+
+// todo check paper
+type RequestVoteRequest struct {
+	Term 		 	int
+	CandidateId 	int
+	LastLogIndex 	int
+	LastLogTerm		int
+}
+
+type RequstVoteResponse struct {
+	Term 			int
+	VoteGranted		bool
+}
 
 // Raft peer
-
 type Raft struct {
 
 	// Lock to protect shared access to this peer's state
+	// this can be set to RWMutex to get  further optimized
 	mu 			sync.Mutex
 	// RPC client of all peers
 	peers 		[]*chanrpc.Client
@@ -51,6 +141,207 @@ type Raft struct {
 
 
 	// todo data here
+	state 			RaftState
+	applyCh 		chan ApplyMsg
+	applyCond 		*sync.Cond // used to wakeup applier goroutine after committing new entries
+	replicatorCond 	[]*sync.Cond // used to signal replicator goroutine to batch replicating entries
+
+
+	// election
+	heartBeatTimer  *time.Timer
+	electionTimer 	*time.Timer
+
+	// paper Figure 2 // persistent state
+	currentTerm 	int
+	votedFor 		int
+	logs			[]Entry // set a dummy Entry which contains LastSnapshotTerm , LastSnapshotIndex and nil Command
+
+
+	// volatile state on all server
+	commitIndex 	int
+	lastApplied		int
+
+
+	// volatile state on leaders
+	nextIndex		[]int
+	matchIndex		[]int
+
+
+
+}
+//
+// the service or tester wants to create a Raft server. the ports
+// of all the Raft servers (including this one) are in peers[]. this
+// server's port is peers[me]. all the servers' peers[] arrays
+// have the same order. persister is a place for this server to
+// save its persistent state, and also initially holds the most
+// recent saved state, if any. applyCh is a channel on which the
+// tester or service expects Raft to send ApplyMsg messages.
+// Make() must return quickly, so it should start goroutines
+// for any long-running work.
+//
+func Make(peers []*chanrpc.Client, me int,
+	persister *Persister, applyCh chan ApplyMsg) *Raft {
+
+
+
+	rf := &Raft{}
+	rf.peers = peers
+	rf.persister = persister
+	rf.me = me
+	rf.dead = 0
+
+	rf.applyCh = applyCh
+	rf.replicatorCond = make([]*sync.Cond , len(peers))
+	rf.state  = Follower
+
+	rf.currentTerm = 0
+	rf.votedFor = -1
+	rf.logs = make([]Entry,1)
+
+	rf.nextIndex = make([]int,len(peers))
+	rf.matchIndex = make([]int,len(peers))
+
+	rf.heartBeatTimer = time.NewTimer(StableHeartbeatTimeout())
+	rf.electionTimer = time.NewTimer(RandomizedElectionTimeout())
+
+
+
+
+	// Your initialization code here (2A, 2B, 2C).
+
+	// initialize from state persisted before a crash
+	rf.readPersist(persister.ReadRaftState())
+
+	rf.applyCond = sync.NewCond(&rf.mu)
+
+	lastLog := rf.getLastLog()
+
+	for i :=0 ; i< len(peers) ; i++{
+		// todo what is nextIndex
+		rf.matchIndex[i] , rf.nextIndex[i] = 0 , lastLog.Index + 1
+
+		if i != rf.me{
+			rf.replicatorCond[i] = sync.NewCond(&sync.Mutex{})
+				go rf.replicator(i)
+		}
+
+	}
+
+
+
+
+
+	// start ticker goroutine to start elections
+	go rf.ticker()
+	// todo make Raft server
+
+	// start applier goroutine to push committed logs into applyCh exactly once
+	go rf.applier()
+	// applyCh -> upper service
+
+	// upper service -> raft
+	// rf.Start()
+
+	return rf
+}
+
+
+// check replica
+func (rf *Raft) replicator(peer int) {
+	rf.replicatorCond[peer].L.Lock()
+	defer rf.replicatorCond[peer].L.Unlock()
+
+	for rf.killed() == false {
+		for !rf.needReplicating(peer){
+			// releader CPU
+			rf.replicatorCond[peer].Wait()
+		}
+		// replicate one round()
+		rf.replicateOneRound(peer)
+	}
+}
+
+// used by replicator goroutine to judge whether a peer needs replicating
+func (rf *Raft) needReplicating(peer int) bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// only leader maintains the replicas
+	return rf.state == Leader && rf.matchIndex[peer] < rf.getLastLog().Index
+}
+
+func (rf *Raft) replicateOneRound(peer int) {
+	rf.mu.Lock()
+	// defer rf.mu.Unlock()
+	// double check
+	if rf.state != Leader {
+		rf.mu.Unlock()
+		// not leader
+		return
+	}
+
+	prevLogIndex := rf.nextIndex[peer] -1
+
+	if prevLogIndex < rf.getFirstLog().Index {
+		// only sanpshot can catch up
+		request := rf.genInstallSnapshotRequest()
+		rf.mu.Unlock()
+
+		response := new(InstallSnapshotResponse)
+
+		if rf.sendInstallSnapshot(peer,request,response) {
+			rf.mu.Lock()
+			rf.handleInstallSnapshotResponse(peer,request,response)
+			rf.mu.Unlock()
+		}
+
+	} else {
+		// just entries can catch up
+
+		request := rf.genAppendEntriesRequest(prevLogIndex)
+
+		rf.mu.Unlock()
+
+		response := new(AppendEntriesResponse)
+
+		if rf.sendAppendEntriesResponse(peer,request,response) {
+			rf.mu.Lock()
+			rf.handdleAppendEntriesResponse(peer,request,response)
+			rf.mu.Unlock()
+		}
+
+	}
+}
+
+
+
+func (rf *Raft) genAppendEntriesRequest(prevLogIndex int) *AppendEntriesRequest{
+	//todo
+	return new(AppendEntriesRequest)
+}
+
+
+
+
+// a dedicated applier goroutine to guarantee that each log Entry will be push into applyCh exactly once
+// ensuring that service's applying entries and raft's committing entries can be parallel
+// commit a entry
+// apply the entry to upper services
+func (rf *Raft) applier(){
+	// todo
+}
+
+// get the first log Entry
+
+func (rf *Raft) getFirstLog() Entry{
+	return rf.logs[0]
+}
+
+
+// get the last log Entry
+func (rf *Raft) getLastLog() Entry{
+	return rf.logs[len(rf.logs)-1]
 }
 
 
@@ -228,38 +519,5 @@ func (rf *Raft) ticker() {
 	}
 }
 
-//
-// the service or tester wants to create a Raft server. the ports
-// of all the Raft servers (including this one) are in peers[]. this
-// server's port is peers[me]. all the servers' peers[] arrays
-// have the same order. persister is a place for this server to
-// save its persistent state, and also initially holds the most
-// recent saved state, if any. applyCh is a channel on which the
-// tester or service expects Raft to send ApplyMsg messages.
-// Make() must return quickly, so it should start goroutines
-// for any long-running work.
-//
-func Make(peers []*chanrpc.Client, me int,
-	persister *Persister, applyCh chan ApplyMsg) *Raft {
-	rf := &Raft{}
-	rf.peers = peers
-	rf.persister = persister
-	rf.me = me
-
-	// Your initialization code here (2A, 2B, 2C).
-
-	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
-
-	// start ticker goroutine to start elections
-	go rf.ticker()
-	// todo make Raft server
-	// applyCh -> upper service
-
-	// upper service -> raft
-	// rf.Start()
-
-	return rf
-}
 
 
