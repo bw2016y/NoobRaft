@@ -347,12 +347,11 @@ func (rf *Raft) getLastLog() Entry{
 
 // return current term and whether this server believes it is the leader
 func (rf *Raft) GetState() (int,bool){
-	var term int
-	var isLeader bool
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-	// todo code
+	return rf.currentTerm , rf.state == Leader
 
-	return term , isLeader
 }
 
 //
@@ -362,6 +361,8 @@ func (rf *Raft) GetState() (int,bool){
 //
 func (rf *Raft) persist(){
 	// todo
+
+
 }
 
 // restore previously persisted state
