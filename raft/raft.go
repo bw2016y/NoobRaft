@@ -13,6 +13,7 @@ package raft
 
 import (
 	"MRaft/chanrpc"
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -34,6 +35,19 @@ const (
 	ElectionTimeout = 1000
 
 )
+
+
+func (state RaftState) String() string{
+	switch state{
+	case Follower:
+		return "Follower"
+	case Leader:
+		return "Leader"
+	case Candidate:
+		return "Candidate"
+	}
+	panic(fmt.Sprintf("unexpected RaftState %d",state))
+}
 
 type localRand struct {
 	rand *rand.Rand
@@ -119,7 +133,7 @@ type RequestVoteRequest struct {
 	LastLogTerm		int
 }
 
-type RequstVoteResponse struct {
+type RequestVoteResponse struct {
 	Term 			int
 	VoteGranted		bool
 }
@@ -452,7 +466,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 //
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteResponse) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
@@ -509,6 +523,8 @@ func (rf *Raft) killed() bool {
 
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
+//
+//
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
 
@@ -516,8 +532,94 @@ func (rf *Raft) ticker() {
 		// be started and to randomize sleeping time using
 		// time.Sleep().
 		// todo election start check
+
+		select {
+				case <- rf.electionTimer.C:
+					// elect
+					rf.mu.Lock()
+
+					rf.ChangeState(Candidate)
+					rf.currentTerm += 1
+					rf.StartElection()
+					rf.electionTimer.Reset(RandomizedElectionTimeout())
+
+					rf.mu.Unlock()
+
+
+
+				case <- rf.heartBeatTimer.C:
+					// todo
+		}
 	}
 }
 
+// call with Lock
+func (rf *Raft) StartElection(){
+	 request := rf.genRequestVoteRequest()
+	 DPrintf("{Node %v} starts election with RequestVoteRequest %v", rf.me , request)
 
+	 grantedVotes := 1
+	 rf.votedFor = rf.me
 
+	 // todo why persist here?
+	 rf.persist()
+	 for peer := range rf.peers {
+		 if peer == rf.me {
+			 continue
+		 }
+		 go func(peer int){
+			 response := new (RequestVoteResponse)
+			 if rf.sendRequestVote(peer,request,response){
+				 rf.mu.Lock()
+				 defer rf.mu.Unlock()
+				 DPrintf("{Node  %v} receives RequestVoteResponse %v from {Node %v} after sending RequestVoteRequest %v in term %v", rf.me, response , peer , request  ,rf.currentTerm )
+				 if rf.currentTerm == request.Term && rf.state == Candidate{
+					 if response.VoteGranted {
+						 grantedVotes += 1
+						 if grantedVotes > len(rf.peers)/2{
+							 // seccess
+							 DPrintf("{Node %v} receives majority votes in term %v", rf.me , rf.currentTerm)
+							 rf.ChangeState(Leader)
+							 rf.BroadcastHeartbeat(true)
+						 }
+					 }else if response.Term > rf.currentTerm{
+						 DPrintf("{Node %v} finds a new leader {Node %v} with term %v and steps down in term %v", rf.me , peer , response.Term ,rf.currentTerm)
+						 rf.ChangeState(Follower)
+						 // didnt vote in that term yet
+						 rf.currentTerm , rf.votedFor = response.Term , -1
+						 // todo why persist here?
+						 rf.persist()
+
+					 }
+				 }
+
+			 }
+		 }(peer)
+	 }
+
+}
+
+func (rf *Raft) ChangeState(to RaftState){
+	if rf.state == to {
+		return
+	}
+	DPrintf("Node %d change state from %s to %s in term %d", rf.me , rf.state , to ,  rf.currentTerm)
+
+	rf.state = to
+	switch to{
+	case Follower:
+		rf.heartBeatTimer.Stop()
+		rf.electionTimer.Reset(RandomizedElectionTimeout())
+	case Candidate:
+		// todo
+	case Leader:
+		lastLog := rf.getLastLog()
+		for i:=0 ;i<len(rf.peers);i++{
+
+			// reset matchIndex and nextIndex
+			rf.matchIndex[i] , rf.nextIndex[i] = 0, lastLog.Index+1
+		}
+		rf.electionTimer.Stop()
+		rf.heartBeatTimer.Reset(StableHeartbeatTimeout())
+	}
+}
