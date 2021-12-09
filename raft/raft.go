@@ -319,9 +319,9 @@ func (rf *Raft) replicateOneRound(peer int) {
 
 		response := new(AppendEntriesResponse)
 
-		if rf.sendAppendEntriesResponse(peer,request,response) {
+		if rf.sendAppendEntries(peer,request,response) {
 			rf.mu.Lock()
-			rf.handdleAppendEntriesResponse(peer,request,response)
+			rf.handleAppendEntriesResponse(peer , request , response)
 			rf.mu.Unlock()
 		}
 
@@ -331,8 +331,22 @@ func (rf *Raft) replicateOneRound(peer int) {
 
 
 func (rf *Raft) genAppendEntriesRequest(prevLogIndex int) *AppendEntriesRequest{
-	//todo
-	return new(AppendEntriesRequest)
+
+	firstIndex := rf.getFirstLog().Index
+	entries := make([]Entry,len(rf.logs[prevLogIndex +1-firstIndex :]))
+	copy(entries , rf.logs[prevLogIndex+1 - firstIndex:])
+
+
+
+	return & AppendEntriesRequest{
+		Term: 			rf.currentTerm,
+		LeaderId:		rf.me,
+		PrevLogIndex:	prevLogIndex,
+		PrevLogTerm:	rf.logs[prevLogIndex-firstIndex].Term,
+		Entries:		entries,
+		LeaderCommit:	rf.commitIndex,
+	}
+
 }
 
 
@@ -413,7 +427,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
-
+// todo delete this
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
 
@@ -424,6 +438,7 @@ type RequestVoteArgs struct {
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 //
+// todo delete this
 type RequestVoteReply struct {
 	// Your data here (2A).
 	// todo VoteRepArgs
@@ -433,9 +448,35 @@ type RequestVoteReply struct {
 //
 // example RequestVote RPC handler.
 //
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+func (rf *Raft) RequestVote(request *RequestVoteRequest, response * RequestVoteResponse) {
 	// Your code here (2A, 2B).
 	// todo deal with Votes
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer rf.persist()
+	defer DPrintf("{Node %v}'s state is{state %v, term %v , commitIndex %v, lastApplied %v , firstLog %v , lastLog %v} before processing requestVoteRequest %v and reply requestVoteResponse %v", rf.me , rf.state , rf.currentTerm,  rf.commitIndex , rf.lastApplied , rf.getFirstLog(), rf.getLastLog() , request, response)
+
+	if request.Term < rf.currentTerm || (request.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != request.CandidateId){
+		response.Term , response.VoteGranted = rf.currentTerm , false
+		return
+	}
+
+	if request.Term > rf.currentTerm {
+		rf.ChangeState(Follower)
+		rf.currentTerm , rf.votedFor = request.Term , -1
+	}
+
+	if !rf.isLogUpToDate(request.LastLogTerm , request.LastLogIndex){
+		response.Term , response.VoteGranted = rf.currentTerm , false
+		return
+	}
+
+	rf.votedFor = request.CandidateId
+	rf.electionTimer.Reset(RandomizedElectionTimeout())
+
+	response.Term , response.VoteGranted = rf.currentTerm , true
+	return
 }
 
 //
@@ -467,9 +508,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 //
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteResponse) bool {
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteRequest, reply *RequestVoteResponse) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
+}
+
+func (rf *Raft) sendAppendEntries(server int, request * AppendEntriesRequest , response * AppendEntriesResponse) bool{
+	return rf.peers[server].Call("Raft.AppendEntries",request,response)
 }
 
 //
@@ -550,6 +595,14 @@ func (rf *Raft) ticker() {
 
 				case <- rf.heartBeatTimer.C:
 					// todo
+					rf.mu.Lock()
+
+					if rf.state == Leader{
+						rf.BroadcastHeartbeat(true)
+						rf.heartBeatTimer.Reset(StableHeartbeatTimeout())
+					}
+
+					rf.mu.Unlock()
 		}
 	}
 }
@@ -599,6 +652,55 @@ func (rf *Raft) StartElection(){
 	 }
 
 }
+// HearBeat
+
+
+func (rf *Raft) BroadcastHeartbeat (isHeartBeat bool){
+	for peer := range rf.peers{
+		if peer == rf.me{
+			continue
+		}
+		if isHeartBeat {
+			// need sending at once to maintain leadership
+			go rf.replicateOneRound(peer)
+		}else {
+			// just signal replicator goroutine to send entries in batch
+			rf.replicatorCond[peer].Signal()
+		}
+	}
+}
+
+
+
+// Vote Stuff
+
+
+func (rf *Raft) genRequestVoteRequest() *RequestVoteRequest {
+	lastLog := rf.getLastLog()
+	return & RequestVoteRequest{
+		Term: 				rf.currentTerm,
+		CandidateId: 		rf.me,
+		LastLogIndex:       lastLog.Index,
+		LastLogTerm:		lastLog.Term,
+	}
+}
+// Append
+
+func (rf *Raft) AppendEntries(request * AppendEntriesRequest , response * AppendEntriesResponse) {
+	// todo append Entries
+}
+
+// check Log stuff
+
+// called with a lock
+func (rf *Raft) isLogUpToDate(term , index int) bool{
+
+	lastLog := rf.getLastLog()
+
+	return term > lastLog.Term || (term == lastLog.Term && index >= lastLog.Index)
+
+}
+
 
 func (rf *Raft) ChangeState(to RaftState){
 	if rf.state == to {
