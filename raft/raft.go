@@ -688,9 +688,90 @@ func (rf *Raft) genRequestVoteRequest() *RequestVoteRequest {
 
 func (rf *Raft) AppendEntries(request * AppendEntriesRequest , response * AppendEntriesResponse) {
 	// todo append Entries
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer rf.persist()
+	defer DPrintf("{Node %v}'s state is {state %v , term %v , commitIndex %v , lastApplied %v , firstLog %v, lastLog %v} before processing AppendEntriesRequest %v and reply AppendEntriesResponse %v", rf.me , rf.state  , rf.currentTerm , rf.commitIndex , rf.lastApplied , rf.getFirstLog() , rf.getLastLog() ,  request , response)
+
+
+	if request.Term < rf.currentTerm {
+		response.Term , response.Success = rf.currentTerm , false
+		return
+	}
+
+	if request.Term > rf.currentTerm {
+		rf.currentTerm , rf.votedFor = request.Term , -1
+	}
+
+	rf.ChangeState(Follower)
+	rf.electionTimer.Reset(RandomizedElectionTimeout())
+
+
+
+	// todo check paper
+	if request.PrevLogIndex < rf.getFirstLog().Index {
+		response.Term , response.Success = 0 ,false
+		DPrintf("{Node %v} receives unexpected AppendEntriesRequest %v from {Node %v} because prevLogIndex %v < firstLogIndex %v", rf.me , request , request.LeaderId , request.PrevLogIndex , rf.getFirstLog().Index)
+		return
+	}
+
+
+	if !rf.matchLog(request.PrevLogTerm , request.PrevLogIndex){
+		response.Term , response.Success = rf.currentTerm , false
+		lastIndex := rf.getLastLog().Index
+
+		if  lastIndex < request.PrevLogIndex {
+			response.ConflictTerm , response.ConflictIndex  = -1 , lastIndex + 1
+		} else {
+			firstIndex := rf.getFirstLog().Index
+			response.ConflictTerm = rf.logs[request.PrevLogIndex-firstIndex].Term
+			index := request.PrevLogIndex-1
+			for index >= firstIndex && rf.logs[index-firstIndex].Term == response.ConflictTerm{
+				index--
+			}
+			response.ConflictIndex = index
+		}
+		return
+	}
+
+	firstIndex := rf.getFirstLog().Index
+	for index , entry := range request.Entries{
+		if entry.Index - firstIndex >= len(rf.logs) || rf.logs[entry.Index - firstIndex].Term != entry.Term{
+			rf.logs = shrinkEntriesArray(append(rf.logs[:entry.Index-firstIndex],request.Entries[index:]...))
+			break
+		}
+	}
+
+
+	rf.advanceCommitIndexForFollower(request.LeaderCommit)
+
+	response.Term , response.Success = rf.currentTerm , true
+
 }
 
 // check Log stuff
+// call with a lock
+// judge whether log is matched
+func (rf *Raft) matchLog(term , index int) bool{
+	return index <= rf.getLastLog().Index && rf.logs[index-rf.getFirstLog().Index].Term == term
+}
+
+// used to advance commitIndex by leaderCommit
+func (rf *Raft) advanceCommitIndexForFollower(leaderCommit int){
+	// todo
+}
+
+func shrinkEntriesArray(entries []Entry) []Entry{
+	const lenMultiple = 2
+	if len(entries) * lenMultiple < cap(entries){
+		newEntries := make([]Entry , len(entries))
+		copy(newEntries,entries)
+		return newEntries
+	}
+	return entries
+}
+
 
 // called with a lock
 func (rf *Raft) isLogUpToDate(term , index int) bool{
