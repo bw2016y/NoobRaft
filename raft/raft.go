@@ -517,6 +517,10 @@ func (rf *Raft) sendAppendEntries(server int, request * AppendEntriesRequest , r
 	return rf.peers[server].Call("Raft.AppendEntries",request,response)
 }
 
+func (rf *Raft) sendInstallSnapshot(server int, request *InstallSnapshotRequest , response *InstallSnapshotResponse) bool{
+	return rf.peers[server].Call("Raft.InstallSnapshot",request,response)
+}
+
 //
 //
 // the service using Raft (e.g. a k/v server) wants to start
@@ -670,7 +674,22 @@ func (rf *Raft) BroadcastHeartbeat (isHeartBeat bool){
 	}
 }
 
+// snapshot stuff
 
+func (rf *Raft) genInstallSnapshotRequest() *InstallSnapshotRequest{
+	firstLog := rf.getFirstLog()
+	return &InstallSnapshotRequest{
+		Term:				rf.currentTerm,
+		LeaderId:			rf.me,
+		LastIncludedIndex:	firstLog.Index,
+		LastIncludedTerm:	firstLog.Term,
+		Data:				rf.persister.ReadSnapshot(),
+	}
+}
+
+func (rf *Raft) handleInstallSnapshotResponse(peer int,request *InstallSnapshotRequest, response *InstallSnapshotResponse){
+	// todo
+}
 
 // Vote Stuff
 
@@ -750,6 +769,37 @@ func (rf *Raft) AppendEntries(request * AppendEntriesRequest , response * Append
 
 }
 
+func (rf *Raft) handleAppendEntriesResponse(peer int , request *AppendEntriesRequest , response *AppendEntriesResponse){
+	if rf.state == Leader && rf.currentTerm == request.Term{
+		if response.Success{
+			rf.matchIndex[peer] = request.PrevLogIndex + len(request.Entries)
+			rf.nextIndex[peer] = rf.matchIndex[peer] + 1
+			rf.advanceCommitIndexForLeader()
+		}else{
+			if response.Term > rf.currentTerm {
+				rf.ChangeState(Follower)
+				rf.currentTerm , rf.votedFor = response.Term , -1
+				rf.persist()
+
+			}else if response.Term == rf.currentTerm {
+				rf.nextIndex[peer] = response.ConflictIndex
+				if response.ConflictTerm != -1 {
+					firstIndex := rf.getFirstLog().Index
+					for i:= request.PrevLogIndex ; i>= firstIndex ;i--{
+						if rf.logs[i-firstIndex].Term == response.ConflictTerm {
+							rf.nextIndex[peer] = i + 1
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+	DPrintf("{Node %v}'state is {state %v , term %v , commitIndex %v , lastApplied %v , firstLog %v , lastLog %v} after handling AppendEntriesResponse %v for AppendEntriesRequest %v", rf.me , rf.state , rf.currentTerm , rf.commitIndex, rf.lastApplied, rf.getFirstLog() , rf.getLastLog(), response , request )
+
+
+}
+
 // check Log stuff
 // call with a lock
 // judge whether log is matched
@@ -757,10 +807,50 @@ func (rf *Raft) matchLog(term , index int) bool{
 	return index <= rf.getLastLog().Index && rf.logs[index-rf.getFirstLog().Index].Term == term
 }
 
+// used to compute and advance commitIndex by matchIndex[]
+func (rf *Raft) advanceCommitIndexForLeader(){
+
+	n := len(rf.matchIndex)
+	srt := make([]int, n)
+	copy(srt, rf.matchIndex)
+
+	insertionSort(srt)
+
+	newCommitIndex := srt[ n - (n/2+1) ]
+
+	if newCommitIndex > rf.commitIndex {
+		// only advance commitIndex for current term's log
+		if rf.matchLog(rf.currentTerm, newCommitIndex){
+
+
+			DPrintf("{Node %d} advance commitIndex from %d to %d with matchIndex %v in term %d" , rf.me , rf.commitIndex, newCommitIndex , rf.matchIndex,  rf.currentTerm)
+			rf.commitIndex = newCommitIndex
+			rf.applyCond.Signal()
+
+
+		}else {
+			DPrintf("{Node %d} can not advance commitIndex from %d because the term of newCommitIndex %d is not equal to currentTerm %d", rf.me, rf.commitIndex,  newCommitIndex, rf.currentTerm)
+		}
+
+	}
+
+}
+
+
+
 // used to advance commitIndex by leaderCommit
 func (rf *Raft) advanceCommitIndexForFollower(leaderCommit int){
-	// todo
+	newCommitIndex := Min(leaderCommit , rf.getLastLog().Index)
+
+	if newCommitIndex > rf.commitIndex {
+		DPrintf("{Node %d} advance commitIndex from %d to %d with leaderCommit %d in term %d", rf.me, rf.commitIndex , newCommitIndex , leaderCommit , rf.currentTerm )
+		rf.commitIndex = newCommitIndex
+		rf.applyCond.Signal()
+	}
 }
+
+
+
 
 func shrinkEntriesArray(entries []Entry) []Entry{
 	const lenMultiple = 2

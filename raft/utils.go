@@ -16,6 +16,34 @@ import (
 )
 import crand "crypto/rand"
 
+
+
+func Min(x , y int) int{
+	if x>y{
+		return y
+	}else {
+		return x
+	}
+}
+
+func Max(x, y int) int{
+	if x<y{
+		return y
+	}else{
+		return x
+	}
+}
+
+func insertionSort(arr []int){
+	a,b := 0 , len(arr)
+	for i:= a+1 ; i<b ; i++{
+		for j:= i; j>a && arr[j] < arr[j-1] ; j--{
+			// swap
+			arr[j] , arr[j-1] = arr[j-1] , arr[j]
+		}
+	}
+}
+
 const Debug = false
 
 func DPrintf(format string , args ... interface{})(n int, err error){
