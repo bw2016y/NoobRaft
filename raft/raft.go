@@ -13,6 +13,8 @@ package raft
 
 import (
 	"MRaft/chanrpc"
+	"MRaft/labgob"
+	"bytes"
 	"fmt"
 	"math/rand"
 	"sync"
@@ -388,14 +390,44 @@ func (rf *Raft) GetState() (int,bool){
 // see paper's Figure 2 for a description of what should be persistent.
 //
 func (rf *Raft) persist(){
-	// todo
+	rf.persister.SaveRaftState(rf.encodeState())
+}
 
+func (rf *Raft) encodeState() []byte{
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
 
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logs)
+
+	return w.Bytes()
 }
 
 // restore previously persisted state
 func (rf *Raft) readPersist(data []byte){
-	// todo add code
+
+	if data == nil || len(data) == 0 {
+		return
+	}
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+
+	var currentTerm , votedFor int
+	var logs []Entry
+
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&logs) != nil {
+		DPrintf("{Node %v} restores persisted state failed", rf.me)
+	}
+
+
+	rf.currentTerm , rf.votedFor , rf.logs = currentTerm , votedFor , logs
+
+	// there will always be at least one entry in rf.logs
+	rf.lastApplied , rf.commitIndex = rf.logs[0].Index , rf.logs[0].Index
 }
 
 
@@ -407,8 +439,30 @@ func (rf *Raft) readPersist(data []byte){
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 
 	// Your code here (2D).
-	// todo add code
 
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	DPrintf("{Node %v} service calls CondInstallSnapshot with lastIncludedTerm %v and lastIncludeIndex %v to check whether snapshot is still valid in term %v", rf.me , lastIncludedTerm ,lastIncludedIndex , rf.currentTerm)
+
+	// outdated snapshot
+	if lastIncludedIndex <= rf.commitIndex {
+		DPrintf("{Node %v} rejects the snapshot which lastIncludedIndex is %v because commitIndex %v is larger", rf.me , lastIncludedIndex, rf.commitIndex)
+		return false
+	}
+
+	if lastIncludedIndex > rf.getLastLog().Index{
+		rf.logs = make([]Entry,1)
+	}else {
+		rf.logs = shrinkEntriesArray(rf.logs[lastIncludedIndex-rf.getFirstLog().Index:])
+		rf.logs[0].Command = nil
+	}
+
+	// update dummy entry with lastIncludedTerm and lastIncludedIndex
+	rf.logs[0].Term , rf.logs[0].Index = lastIncludedTerm, lastIncludedIndex
+	rf.lastApplied , rf.commitIndex = lastIncludedIndex , lastIncludedIndex
+
+	rf.persister.SaveStateAndSnapshot(rf.encodeState(),snapshot)
+	DPrintf("{Node %v}' state is {state %v,term %v,commitIndex %v,lastApplied %v, firstLog %v, lastLog %v} after accepting the snaphost which lastIncludedTerm is %v , lastIncludedIndex is %v",rf.me , rf.state , rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), lastIncludedTerm, lastIncludedIndex)
 	return true
 }
 
@@ -419,7 +473,21 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
-	// todo make snapshot
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	snapshotIndex := rf.getFirstLog().Index
+	if index <= snapshotIndex{
+		DPrintf("{Node %v} rejects replacing log with snapshotIndex %v as current snapshotIndex %v is larger in term %v",rf.me , index, snapshotIndex, rf.currentTerm )
+		return
+	}
+
+	rf.logs = shrinkEntriesArray(rf.logs[index-snapshotIndex:])
+	rf.logs[0].Command = nil
+	rf.persister.SaveStateAndSnapshot(rf.encodeState(), snapshot)
+
+	DPrintf("{Node %v}'s state is {state %v, term %v, commitIndex %v, lastApplied %v, firstLog %v , lastLog %v} after replacing log with snapshotIndex %v as old snapshotIndex %v is smaller",rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), index , snapshotIndex)
+
 }
 
 
@@ -538,15 +606,39 @@ func (rf *Raft) sendInstallSnapshot(server int, request *InstallSnapshotRequest 
 // the leader.
 //
 //
+
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+
 
 	// Your code here (2B).
-	// todo upper service api
+	// upper service api
 
-	return index, term, isLeader
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.state != Leader{
+		return -1 , -1 , false
+	}
+
+	newLog := rf.appendNewEntry(command)
+	DPrintf("{Node %v} receives a new command[%v] to replicate in term %v", rf.me , newLog, rf.currentTerm)
+	rf.BroadcastHeartbeat(false)
+	return newLog.Index , newLog.Term , true
+
+}
+
+// to append a new Entry to logs
+func (rf *Raft) appendNewEntry(command interface{}) Entry{
+	lastLog := rf.getLastLog()
+
+	newLog := Entry{lastLog.Index+1 , rf.currentTerm , command}
+	rf.logs = append(rf.logs, newLog)
+	rf.matchIndex[rf.me] , rf.nextIndex[rf.me] = newLog.Index , newLog.Index + 1
+
+	rf.persist()
+	return newLog
+
 }
 
 //
@@ -567,8 +659,7 @@ func (rf *Raft) Kill() {
 }
 
 func (rf *Raft) killed() bool {
-	z := atomic.LoadInt32(&rf.dead)
-	return z == 1
+	return atomic.LoadInt32(&rf.dead) == 1
 }
 
 // The ticker go routine starts a new election if this peer hasn't received
@@ -656,8 +747,9 @@ func (rf *Raft) StartElection(){
 	 }
 
 }
-// HearBeat
 
+
+// HearBeat
 
 func (rf *Raft) BroadcastHeartbeat (isHeartBeat bool){
 	for peer := range rf.peers{
@@ -689,7 +781,58 @@ func (rf *Raft) genInstallSnapshotRequest() *InstallSnapshotRequest{
 
 func (rf *Raft) handleInstallSnapshotResponse(peer int,request *InstallSnapshotRequest, response *InstallSnapshotResponse){
 	// todo
+
+	if rf.state == Leader && rf.currentTerm == request.Term {
+		if response.Term > rf.currentTerm {
+			rf.ChangeState(Follower)
+			rf.currentTerm , rf.votedFor = response.Term , -1
+			rf.persist()
+		}else{
+			rf.matchIndex[peer] , rf.nextIndex[peer] = request.LastIncludedIndex , request.LastIncludedIndex + 1
+		}
+	}
+	DPrintf("{Node %v}' state is {state %v , term %v , commitIndex %v , lastApplied %v , firstLog %v , lastLog %v} after handling InstallSnapshotResponse %v for InstallSnapshotRequest %v",rf.me , rf.state , rf.currentTerm, rf.commitIndex, rf.lastApplied , rf.getFirstLog(), rf.getLastLog(), response , request)
 }
+
+func (rf *Raft) InstallSnapshot(request *InstallSnapshotRequest ,response *InstallSnapshotResponse){
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer DPrintf("{Node %v}'s state is {state %v, term %v, commitIndex %v, lastApplied %v, firstLog %v ,lastLog %v} before processing InstallSnapshotRequest %v and reply InstallSnapshotResponse %v", rf.me, rf.state , rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), request , response)
+
+
+	response.Term = rf.currentTerm
+
+	if request.Term < rf.currentTerm{
+		return
+	}
+
+	if request.Term > rf.currentTerm{
+		rf.currentTerm , rf.votedFor = request.Term , -1
+		rf.persist()
+	}
+
+	rf.ChangeState(Follower)
+	rf.electionTimer.Reset(RandomizedElectionTimeout())
+
+	// outdated snapshot
+	if request.LastIncludedIndex <= rf.commitIndex {
+		return
+	}
+
+	go func() {
+		rf.applyCh <- ApplyMsg{
+			SnapshotValid:  true,
+			Snapshot:		request.Data,
+			SnapshotTerm:	request.LastIncludedTerm,
+			SnapshotIndex:	request.LastIncludedIndex,
+		}
+	}()
+
+}
+
+
+
+
 
 // Vote Stuff
 

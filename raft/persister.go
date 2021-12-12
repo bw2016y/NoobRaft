@@ -49,7 +49,7 @@ func (ps *Persister) RaftStateSize() int{
 	return len(ps.raftstate)
 }
 
-func (ps *Persister) SaveStateAndSanpshot(state []byte , snapshot []byte){
+func (ps *Persister) SaveStateAndSnapshot(state []byte , snapshot []byte){
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
