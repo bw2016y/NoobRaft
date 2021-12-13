@@ -72,6 +72,7 @@ var rrand = &localRand{
 type ApplyMsg struct {
 	CommandValid bool
 	Command 	 interface{}
+	CommandTerm	 int
 	CommandIndex int
 
 	// For 2D:
@@ -359,7 +360,36 @@ func (rf *Raft) genAppendEntriesRequest(prevLogIndex int) *AppendEntriesRequest{
 // commit a entry
 // apply the entry to upper services
 func (rf *Raft) applier(){
-	// todo
+	for rf.killed() == false {
+		rf.mu.Lock()
+
+		// if there is no need to apply entries , just releader CPU and wait ohter goroutine's signal if they commit new entries
+		for rf.lastApplied >= rf.commitIndex{
+			rf.applyCond.Wait()
+		}
+
+		firstIndex , commitIndex , lastApplied := rf.getFirstLog().Index , rf.commitIndex , rf.lastApplied
+
+
+		entries := make([]Entry , commitIndex  - lastApplied)
+		copy(entries , rf.logs[lastApplied-firstIndex+1: commitIndex-firstIndex+1])
+		rf.mu.Unlock()
+
+
+		for _ , entry := range entries{
+			rf.applyCh <- ApplyMsg{
+				CommandValid:	true,
+				Command:		entry.Command,
+				CommandTerm: 	entry.Term,
+				CommandIndex:	entry.Index,
+			}
+		}
+
+		rf.mu.Lock()
+		DPrintf("{Node %v} applies entries %v - %v in term %v",rf.me, rf.lastApplied, commitIndex, rf.currentTerm)
+		rf.lastApplied = Max(rf.lastApplied , commitIndex)
+		rf.mu.Unlock()
+	}
 }
 
 // get the first log Entry
