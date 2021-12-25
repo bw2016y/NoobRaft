@@ -440,15 +440,17 @@ func MakeService(handler interface{})*Service{
 	for m := 0 ; m <svc.serType.NumMethod(); m++ {
 		method := svc.serType.Method(m)
 
-		mtype := method.Type
+		// mtype := method.Type
 		mname := method.Name
 
-		// 这里对方法的参数数目做了限制
-		if method.PkgPath != "" || mtype.NumIn() != 3 || mtype.In(2).Kind()!= reflect.Ptr || mtype.NumOut() != 0 {
-			log.Fatalf("bad method %v\n",mname)
-		}else{
-			svc.methods[mname] = method
-		}
+		// 这里对方法的参数数目做了限制 remove it
+		svc.methods[mname] = method
+
+		//if method.PkgPath != "" || mtype.NumIn() != 3 || mtype.In(2).Kind()!= reflect.Ptr || mtype.NumOut() != 0 {
+		//	log.Fatalf("bad method %v\n",mname)
+		//}else{
+		//	svc.methods[mname] = method
+		//}
 
 	}
 

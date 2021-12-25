@@ -780,7 +780,6 @@ func (rf *Raft) StartElection(){
 
 
 // HearBeat
-
 func (rf *Raft) BroadcastHeartbeat (isHeartBeat bool){
 	for peer := range rf.peers{
 		if peer == rf.me{

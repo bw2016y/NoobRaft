@@ -14,6 +14,7 @@ func TestInitialElection2A (t *testing.T){
 	cfg := make_config(t , servers , false , false )
 	defer cfg.cleanup()
 
+
 	cfg.begin("Test(2A): initial election")
 
 	// is a Leader elected?
@@ -39,4 +40,19 @@ func TestInitialElection2A (t *testing.T){
 	cfg.checkOneLeader()
 
 	cfg.end()
+}
+
+func TestManyElections2A(t *testing.T){
+	servers := 7
+	cfg := make_config(t,servers, false, false)
+	defer cfg.cleanup()
+
+	cfg.begin("Test (2A): multiple elections")
+
+	cfg.checkOneLeader()
+
+
+
+
+
 }

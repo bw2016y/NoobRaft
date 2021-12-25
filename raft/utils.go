@@ -129,7 +129,6 @@ func make_config(t *testing.T , n int , unreliable bool ,snapshot bool) *config{
 	}
 
 	// create a full set of Rafts
-
 	for i:=0 ; i<cfg.n ;i++{
 		cfg.logs[i] = map[int]interface{}{}
 		cfg.start1(i,applier)
