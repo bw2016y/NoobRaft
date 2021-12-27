@@ -564,6 +564,7 @@ func (cfg *config) wait(index int , n int ,startTerm int) interface{}{
 	return cmd
 }
 
+//
 // do a complete agreement
 // using for loop to find leader
 // try to re submit before giving up
@@ -601,7 +602,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int , retry bool) int{
 		}
 
 
-		if index != -1{
+		if index != -1 {
 			// somebody claimed to be the leader and have submitted our command;
 			// wait a while for agreement
 			t1 := time.Now()
